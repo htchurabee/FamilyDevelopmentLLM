@@ -22,6 +22,13 @@ doc_intelligence_endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
 doc_intelligence_key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY")
 file_path = "./doccuments/file/uploaded_20240910-03.pdf"
 
+# 推論結果格納dirの作成
+   # doccuments: 登録する文書
+   # splits: text化したファイルの格納先
+if not os.path.exists("./doccuments"):
+    os.makedirs("./doccuments/file")
+if not os.path.exists("splits"):
+    os.makedirs("./splits")
 class LLM_Loader:
     @app.route('/')
     def index():
@@ -30,14 +37,18 @@ class LLM_Loader:
 
     @app.route('/upload', methods=["POST"])
     def upload():
+        # 現在の仕様:uploadできるファイルは一件のみ 
+            # すでにファイルがdoccumentsにuploadされていたら削除
         for f in os.listdir("./doccuments/file/"):
+            print(f)
             os.remove(os.path.join("./doccuments/file/", f))
         for f in os.listdir("./doccuments/file/"):
             os.remove(os.path.join("./doccuments/splits/", f))
         file = request.files.get('file')
-        file_name = 'uploaded_'+ file.filename
+        file_name = file.filename
         file_path = os.path.join('./doccuments/file', file_name)
         file.save(file_path)
+        file.close()
         return redirect(url_for('index'))
 
     @app.route('/download/<string:file>')
@@ -45,18 +56,22 @@ class LLM_Loader:
         return send_from_directory('doccuments/file', file, as_attachment=True)
     
     @app.route('/execute', methods = ['POST'])
+    #LLM推論実行エンドポイント
+     # file配下の文書をテキストに変換
     def execute():
         query = request.form.get('query')
         file_name = [file for file in os.listdir('./doccuments/file')][0]
         file_path = os.path.join('./doccuments/file', file_name)
+        # <doccumentInteligence>uploadされている文書をtextファイルとして変換
         loader = AzureAIDocumentIntelligenceLoader(file_path=file_path, api_key = doc_intelligence_key, api_endpoint = doc_intelligence_endpoint, api_model="prebuilt-layout")
         docs = loader.load()
-        # Split the document into chunks base on markdown headers.
+        
         headers_to_split_on = [
             ("#", "Header 1"),
             ("##", "Header 2"),
             ("###", "Header 3"),
         ]
+
         text_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
         docs_string = docs[0].page_content
         splits = text_splitter.split_text(docs_string)
@@ -65,6 +80,7 @@ class LLM_Loader:
                 f.write(split.page_content)
 
         # load embedding model
+         # AzureSearchのデータベースにsplit配下のテキストデータを格納
         aoai_embeddings = AzureOpenAIEmbeddings(
         azure_deployment="text-embedding-ada-002",
         openai_api_version="2024-02-15-preview",  # e.g., "2023-12-01-preview"
@@ -111,6 +127,7 @@ class LLM_Loader:
             return "\n\n".join(doc.page_content for doc in docs)
 
         # answerを得るためのchain
+        # OpenAI,AzureSearchにquery(質問)を入力し、db格納のデータから類似度が高いものを返答する。
         retriever = vector_store.as_retriever()
         answer_chain = (
             {"context": retriever | format_docs, "question": RunnablePassthrough()}
